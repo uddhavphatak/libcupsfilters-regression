@@ -1,0 +1,3 @@
+[submodule "compare/third_party/image-eval"]
+	path = compare/third_party/image-eval
+	url = https://github.com/Sanskary2303/OpenPrinting-Image-Evaluation.git

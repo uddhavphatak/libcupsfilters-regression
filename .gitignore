@@ -1,0 +1,8 @@
+/build/
+/work/
+/results/
+/prefix/
+/.venv/
+harness/harness-*
+__pycache__/
+*.pyc

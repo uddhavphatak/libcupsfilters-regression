@@ -1,0 +1,6 @@
+# Accepted differences between baseline and candidate.
+#
+# <case-id regex (full match)>  <CLASS or *>  <issue link / reason>
+#
+# Example:
+# text-banner-image/.*/default\.pdf  VISUAL_DIFF  banners print the current time

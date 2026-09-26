@@ -1,0 +1,146 @@
+name: compare
+
+on:
+  workflow_dispatch:
+    inputs:
+      libcupsfilters_repo:
+        description: libcupsfilters git URL
+        default: https://github.com/OpenPrinting/libcupsfilters.git
+      baseline_ref:
+        description: Baseline ref (empty = latest 2.1.x tag)
+        default: ""
+      candidate_ref:
+        description: Candidate ref (branch, tag or SHA)
+        default: master
+      strict:
+        description: Fail on unexpected differences
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [compare]
+  schedule:
+    - cron: "0 3 * * 1"
+  push:
+    branches: [main]
+
+env:
+  REPO: ${{ github.event.inputs.libcupsfilters_repo || github.event.client_payload.repo || 'https://github.com/OpenPrinting/libcupsfilters.git' }}
+  BASELINE_REF: ${{ github.event.inputs.baseline_ref || github.event.client_payload.baseline_ref || '' }}
+  CANDIDATE_REF: ${{ github.event.inputs.candidate_ref || github.event.client_payload.candidate_ref || 'master' }}
+  STRICT: ${{ github.event.inputs.strict || github.event.client_payload.strict || 'false' }}
+  # Must be identical in build and compare jobs: paths are compiled in.
+  PREFIX_ROOT: /home/runner/lcf
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      baseline_ref: ${{ steps.r.outputs.baseline_ref }}
+      baseline_sha: ${{ steps.r.outputs.baseline_sha }}
+      candidate_sha: ${{ steps.r.outputs.candidate_sha }}
+    steps:
+      - id: r
+        run: |
+          base="$BASELINE_REF"
+          if [ -z "$base" ]; then
+            base=$(git ls-remote --tags --refs "$REPO" 'refs/tags/2.1.*' | sed 's|.*refs/tags/||' \
+                   | grep -E '^2\.1\.[0-9]+$' | sort -V | tail -n1)
+          fi
+          sha_of() { git ls-remote "$REPO" "$1" "refs/tags/$1" "refs/heads/$1" | head -n1 | cut -f1; }
+          bsha=$(sha_of "$base"); csha=$(sha_of "$CANDIDATE_REF")
+          [ -n "$bsha" ] || bsha="$base"
+          [ -n "$csha" ] || csha="$CANDIDATE_REF"
+          echo "baseline $base ($bsha), candidate $CANDIDATE_REF ($csha)"
+          echo "baseline_ref=$base" >> "$GITHUB_OUTPUT"
+          echo "baseline_sha=$bsha" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$csha" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        side: [baseline, candidate]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select ref
+        run: |
+          if [ "${{ matrix.side }}" = baseline ]; then
+            echo "REF=${{ needs.resolve.outputs.baseline_sha }}" >> "$GITHUB_ENV"
+          else
+            echo "REF=${{ needs.resolve.outputs.candidate_sha }}" >> "$GITHUB_ENV"
+          fi
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PREFIX_ROOT }}/${{ matrix.side }}
+          key: lcf-${{ matrix.side }}-${{ env.REF }}-${{ hashFiles('ci/build.py') }}
+      - name: Build libcupsfilters
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: python3 ci/build.py --install-deps --repo "$REPO" --ref "$REF" --side ${{ matrix.side }} --prefix "$PREFIX_ROOT/${{ matrix.side }}" --pdfio yes
+      - run: tar -C "$PREFIX_ROOT" -czf ${{ matrix.side }}.tar.gz ${{ matrix.side }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prefix-${{ matrix.side }}
+          path: ${{ matrix.side }}.tar.gz
+          retention-days: 3
+
+  compare:
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    continue-on-error: ${{ github.event.inputs.strict != 'true' && github.event.client_payload.strict != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [pdftopdf, pdftoraster, pwg-pclm, pclmtoraster, text-banner-image]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Runtime dependencies
+        run: |
+          python3 ci/build.py --deps-only
+          python3 -m pip install -r compare/requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: prefix-*
+          merge-multiple: true
+      - name: Unpack builds
+        run: |
+          mkdir -p "$PREFIX_ROOT"
+          tar -C "$PREFIX_ROOT" -xzf baseline.tar.gz
+          tar -C "$PREFIX_ROOT" -xzf candidate.tar.gz
+          cat "$PREFIX_ROOT"/*/share/libcupsfilters-regression/build-info.txt
+      - name: Build harnesses
+        run: |
+          make -C harness PREFIX="$PREFIX_ROOT/baseline" SIDE=baseline
+          make -C harness PREFIX="$PREFIX_ROOT/candidate" SIDE=candidate
+      - name: Run cases
+        run: |
+          python3 cases/gen-cases.py
+          for side in baseline candidate; do
+            python3 runner/run.py --prefix "$PREFIX_ROOT/$side" --harness harness/harness-$side \
+              --out results/$side --group ${{ matrix.group }} > results-$side.log
+            tail -n1 results-$side.log
+          done
+      - name: Compare
+        run: |
+          strict=""; [ "$STRICT" = true ] && strict=--strict
+          python3 compare/compare.py --baseline results/baseline --candidate results/candidate \
+            --out report/${{ matrix.group }} $strict
+      - name: Summary
+        if: always()
+        run: cat report/${{ matrix.group }}/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-${{ matrix.group }}
+          path: |
+            report/${{ matrix.group }}
+            results/*/results.json
+            results/*/logs
+          retention-days: 14
