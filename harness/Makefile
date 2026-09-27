@@ -7,8 +7,8 @@ PKG_CONFIG_PATH := $(PREFIX)/lib/pkgconfig:$(PKG_CONFIG_PATH)
 export PKG_CONFIG_PATH
 
 CFLAGS  ?= -O2 -g -Wall
-PKGFLAGS = $(shell pkg-config --cflags libcupsfilters cups)
-PKGLIBS  = $(shell pkg-config --libs libcupsfilters cups)
+PKGFLAGS = -I$(PREFIX)/include $(shell pkg-config --cflags cups)
+PKGLIBS  = -L$(PREFIX)/lib -lcupsfilters $(shell pkg-config --libs cups)
 
 harness-$(SIDE): harness.c
 	$(CC) $(CFLAGS) $(PKGFLAGS) -o $@ $< $(PKGLIBS) -Wl,-rpath,$(PREFIX)/lib
